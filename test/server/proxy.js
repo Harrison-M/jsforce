@@ -4,19 +4,19 @@
  * Module dependencies.
  */
 var express = require('express'),
+    errorHandler = require('errorhandler'),
     http = require('http'),
     path = require('path'),
     request = require('request');
+    Faye = require('faye');
 
 var app = express();
 
-app.configure(function () {
-  app.set('port', process.env.PORT || 3123);
-});
+app.set('port', process.env.PORT || 3123);
 
-app.configure('development', function () {
-  app.use(express.errorHandler());
-});
+if (app.get('env') === 'development') {
+  app.use(errorHandler());
+}
 
 var proxyCounter = 0;
 
@@ -60,6 +60,43 @@ app.get('/', function(req, res) {
   res.send('Node-Salesforce AJAX Proxy');
 });
 
-http.createServer(app).listen(app.get('port'), function () {
+var server = http.createServer(app);
+
+// Streaming proxy
+var fayeServer = new Faye.NodeAdapter({mount: '/cometd/30.0/', timeout: 90});
+
+var shouldError = false;
+
+// Override the faye request handler to insert errors
+var requestHandler = fayeServer.handle;
+fayeServer.handle = function insertError(req, res) {
+  console.log(req.url);
+  auth = req.headers.authorization;
+  console.log(req.headers.authorization);
+  if (shouldError) {
+    shouldError = false;
+    res.statusCode = 500;
+    return res.end();
+  }
+  shouldError = true;
+  requestHandler.apply(fayeServer, arguments);
+};
+
+fayeServer.attach(server);
+
+server.listen(app.get('port'), function () {
   console.log("Express server listening on port " + app.get('port'));
+
+  // Streaming listeners
+  var salesforceClient = new Faye.Client('https://cs16.salesforce.com/cometd/30.0', {});
+  salesforceClient.on('error', console.error);
+  fayeServer.on('subscribe', function(clientId, channel) {
+    console.log('subscribed: ' + channel);
+    salesforceClient.setHeader('Authorization', auth);
+    console.log(auth);
+    salesforceClient.subscribe(channel, function(message) {
+      console.log(message);
+      fayeServer.getClient().publish(channel, message);
+    });
+  });
 });
